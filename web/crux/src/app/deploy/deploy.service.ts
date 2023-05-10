@@ -1,65 +1,89 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { Identity } from '@ory/kratos-client'
 import { DeploymentStatusEnum, Prisma } from '@prisma/client'
-import { concatAll, EMPTY, filter, from, lastValueFrom, map, merge, Observable, Subject } from 'rxjs'
-import Deployment from 'src/domain/deployment'
-import { InternalException, PreconditionFailedException } from 'src/exception/errors'
-import { DeployRequest } from 'src/grpc/protobuf/proto/agent'
-import {
-  DeploymentEditEventMessage,
-  DeploymentProgressMessage,
-  IdRequest,
-  ServiceIdRequest,
-} from 'src/grpc/protobuf/proto/crux'
-import PrismaService from 'src/services/prisma.service'
-import { toPrismaJson } from 'src/shared/mapper'
+import { EMPTY, Observable, Subject, concatAll, concatMap, filter, from, lastValueFrom, map, of } from 'rxjs'
 import {
   ContainerConfigData,
   InstanceContainerConfigData,
   MergedContainerConfigData,
   UniqueSecretKeyValue,
-} from 'src/shared/models'
-import { PaginationQuery } from 'src/shared/dtos/paginating'
+} from 'src/domain/container'
+import Deployment from 'src/domain/deployment'
+import { toPrismaJson } from 'src/domain/utils'
+import { CruxPreconditionFailedException } from 'src/exception/crux-exception'
+import { DeployRequest } from 'src/grpc/protobuf/proto/agent'
+import PrismaService from 'src/services/prisma.service'
 import AgentService from '../agent/agent.service'
-import { ImageDetails } from '../image/image.mapper'
-import ImageService from '../image/image.service'
-import ContainerMapper from '../shared/container.mapper'
+import ContainerMapper from '../container/container.mapper'
+import { EditorLeftMessage, EditorMessage } from '../editor/editor.message'
+import EditorServiceProvider from '../editor/editor.service.provider'
+import { ImageEvent } from '../image/image.event'
+import ImageEventService from '../image/image.event.service'
 import {
   CreateDeploymentDto,
   DeploymentDetailsDto,
   DeploymentDto,
   DeploymentEventDto,
+  DeploymentImageEvent,
   DeploymentLogListDto,
+  DeploymentLogPaginationQuery,
   InstanceDto,
   InstanceSecretsDto,
   PatchDeploymentDto,
   PatchInstanceDto,
 } from './deploy.dto'
-import DeployMapper, { InstanceDetails } from './deploy.mapper'
+import DeployMapper from './deploy.mapper'
+import { DeploymentEventListMessage } from './deploy.message'
 
 @Injectable()
 export default class DeployService {
   private readonly logger = new Logger(DeployService.name)
 
-  readonly instancesCreatedEvent = new Subject<InstancesCreatedEvent>()
-
-  readonly imageDeletedEvent: Observable<string>
+  private deploymentImageEvents = new Subject<DeploymentImageEvent>()
 
   constructor(
     private prisma: PrismaService,
     private agentService: AgentService,
-    imageService: ImageService,
+    imageEventService: ImageEventService,
     private mapper: DeployMapper,
     private containerMapper: ContainerMapper,
+    private readonly editorServices: EditorServiceProvider,
   ) {
-    imageService.imagesAddedToVersionEvent
+    imageEventService
+      .watchEvents()
       .pipe(
-        map(it => from(this.onImagesAddedToVersion(it))),
+        concatMap(async it => {
+          const event = await this.transformImageEvent(it)
+          if (event.type === 'create') {
+            return from(this.onImageAddedToVersion(event))
+          }
+          return of(event)
+        }),
         concatAll(),
       )
-      .subscribe(it => this.instancesCreatedEvent.next(it))
+      .subscribe(it => this.deploymentImageEvents.next(it))
+  }
 
-    this.imageDeletedEvent = imageService.imageDeletedFromVersionEvent
+  async checkDeploymentIsInTheActiveTeam(deploymentId: string, identity: Identity): Promise<boolean> {
+    const deployments = await this.prisma.deployment.count({
+      where: {
+        id: deploymentId,
+        version: {
+          product: {
+            team: {
+              users: {
+                some: {
+                  userId: identity.id,
+                  active: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+
+    return deployments > 0
   }
 
   async getDeploymentDetails(deploymentId: string): Promise<DeploymentDetailsDto> {
@@ -230,7 +254,9 @@ export default class DeployService {
       data: {
         note: req.note ?? undefined,
         prefix: req.prefix ?? undefined,
-        environment: req.environment ?? undefined,
+        environment: req.environment
+          ? req.environment.map(it => this.containerMapper.uniqueKeyValueDtoToDb(it))
+          : undefined,
         updatedBy: identity.id,
       },
     })
@@ -262,7 +288,7 @@ export default class DeployService {
       req.config,
     )
 
-    const config = this.mapper.instanceConfigDataToDb(configData)
+    const config = this.containerMapper.configDataToDb(configData)
 
     await this.prisma.deployment.update({
       where: {
@@ -347,7 +373,7 @@ export default class DeployService {
     const publicKey = agent?.publicKey
 
     if (!publicKey) {
-      throw new PreconditionFailedException({
+      throw new CruxPreconditionFailedException({
         message: 'Agent has no public key',
         property: 'publicKey',
         value: deployment.nodeId,
@@ -405,7 +431,7 @@ export default class DeployService {
     if (invalidSecretsUpdates.length > 0) {
       await this.prisma.$transaction(invalidSecretsUpdates)
 
-      throw new PreconditionFailedException({
+      throw new CruxPreconditionFailedException({
         message: 'Some secrets are invalid',
         property: 'secrets',
         value: invalidSecrets.map(it => ({ ...it, secrets: undefined })),
@@ -441,6 +467,16 @@ export default class DeployService {
         ]
       }),
     )
+
+    const tries = deployment.tries + 1
+    await this.prisma.deployment.update({
+      where: {
+        id: deployment.id,
+      },
+      data: {
+        tries,
+      },
+    })
 
     const deploy = new Deployment(
       {
@@ -497,6 +533,7 @@ export default class DeployService {
         nodeName: deployment.node.name,
       },
       mergedConfigs,
+      tries,
     )
 
     this.logger.debug(`Starting deployment: ${deploy.id}`)
@@ -513,10 +550,10 @@ export default class DeployService {
     })
   }
 
-  async subscribeToDeploymentEvents(request: IdRequest): Promise<Observable<DeploymentProgressMessage>> {
+  async subscribeToDeploymentEvents(id: string): Promise<Observable<DeploymentEventListMessage>> {
     const deployment = await this.prisma.deployment.findUniqueOrThrow({
       where: {
-        id: request.id,
+        id,
       },
       select: {
         id: true,
@@ -534,31 +571,11 @@ export default class DeployService {
       return EMPTY
     }
 
-    return runningDeployment.watchStatus()
+    return runningDeployment.watchStatus().pipe(map(it => this.mapper.progressEventToEventDto(it)))
   }
 
-  subscribeToDeploymentEditEvents(request: ServiceIdRequest): Observable<DeploymentEditEventMessage> {
-    return merge(
-      this.instancesCreatedEvent.pipe(
-        filter(it => it.deploymentIds.includes(request.id)),
-        map(
-          event =>
-            ({
-              instancesCreated: {
-                data: event.instances.map(it => this.mapper.instanceToProto(it)),
-              },
-            } as DeploymentEditEventMessage),
-        ),
-      ),
-      this.imageDeletedEvent.pipe(
-        map(
-          str =>
-            ({
-              imageIdDeleted: str,
-            } as DeploymentEditEventMessage),
-        ),
-      ),
-    )
+  subscribeToDeploymentEditEvents(deploymentId: string): Observable<DeploymentImageEvent> {
+    return this.deploymentImageEvents.pipe(filter(it => it.deploymentIds.includes(deploymentId)))
   }
 
   async getDeployments(identity: Identity): Promise<DeploymentDto[]> {
@@ -625,7 +642,7 @@ export default class DeployService {
 
     const agent = this.agentService.getById(deployment.nodeId)
     if (!agent) {
-      throw new PreconditionFailedException({
+      throw new CruxPreconditionFailedException({
         message: 'Node is unreachable',
         property: 'nodeId',
         value: deployment.nodeId,
@@ -740,11 +757,12 @@ export default class DeployService {
     return this.mapper.toDto(newDeployment)
   }
 
-  async getDeploymentLog(deploymentId: string, query: PaginationQuery): Promise<DeploymentLogListDto> {
-    const { skip, take } = query
+  async getDeploymentLog(deploymentId: string, query: DeploymentLogPaginationQuery): Promise<DeploymentLogListDto> {
+    const { skip, take, try: tryCount } = query
 
     const where: Prisma.DeploymentEventWhereInput = {
       deploymentId,
+      tryCount,
     }
 
     const [events, total] = await this.prisma.$transaction([
@@ -765,14 +783,24 @@ export default class DeployService {
     }
   }
 
-  private async onImagesAddedToVersion(images: ImageDetails[]): Promise<InstancesCreatedEvent> {
-    const versionId = images?.length > 0 ? images[0].versionId : null
-    if (!versionId) {
-      throw new InternalException({
-        message: 'ImagesAddedToVersionEvent generated with empty array',
-      })
-    }
+  private async transformImageEvent(event: ImageEvent): Promise<DeploymentImageEvent> {
+    const deployments = await this.prisma.deployment.findMany({
+      select: {
+        id: true,
+      },
+      where: {
+        versionId: event.versionId,
+      },
+    })
 
+    return {
+      ...event,
+      deploymentIds: deployments.map(it => it.id),
+    }
+  }
+
+  private async onImageAddedToVersion(event: DeploymentImageEvent): Promise<DeploymentImageEvent> {
+    const versionId = event.images?.length > 0 ? event.versionId : null
     const deployments = await this.prisma.deployment.findMany({
       select: {
         id: true,
@@ -784,7 +812,7 @@ export default class DeployService {
 
     const instances = await Promise.all(
       deployments.flatMap(deployment =>
-        images.map(it =>
+        event.images.map(it =>
           this.prisma.instance.create({
             include: {
               config: true,
@@ -806,13 +834,32 @@ export default class DeployService {
     )
 
     return {
-      deploymentIds: deployments.map(it => it.id),
+      ...event,
       instances,
     }
   }
-}
 
-type InstancesCreatedEvent = {
-  deploymentIds: string[]
-  instances: InstanceDetails[]
+  async onEditorJoined(
+    deploymentId: string,
+    clientToken: string,
+    identity: Identity,
+  ): Promise<[EditorMessage, EditorMessage[]]> {
+    const editors = await this.editorServices.getOrCreateService(deploymentId)
+
+    const me = editors.onClientJoin(clientToken, identity)
+
+    return [me, editors.getEditors()]
+  }
+
+  async onEditorLeft(deploymentId: string, clientToken: string): Promise<EditorLeftMessage> {
+    const editors = await this.editorServices.getOrCreateService(deploymentId)
+    const message = editors.onClientLeft(clientToken)
+
+    if (editors.editorCount < 1) {
+      this.logger.verbose(`All editors left removing ${deploymentId}`)
+      this.editorServices.free(deploymentId)
+    }
+
+    return message
+  }
 }

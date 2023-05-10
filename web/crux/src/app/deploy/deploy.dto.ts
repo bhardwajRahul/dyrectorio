@@ -1,14 +1,19 @@
 import { ApiProperty, OmitType, PartialType } from '@nestjs/swagger'
+import { Deployment, Instance, InstanceContainerConfig, Node, Product, Version } from '@prisma/client'
 import { Type } from 'class-transformer'
-import { IsDate, IsIn, IsOptional, IsString, IsUUID } from 'class-validator'
-import { ContainerState, CONTAINER_STATE_VALUES, UniqueKeyValue, UniqueSecretKeyValue } from 'src/shared/models'
-import { PaginatedList } from 'src/shared/dtos/paginating'
-import { ContainerConfigDto, ImageDto } from '../image/image.dto'
+import { IsDate, IsIn, IsInt, IsOptional, IsString, IsUUID, ValidateNested } from 'class-validator'
+import { CONTAINER_STATE_VALUES, ContainerState } from 'src/domain/container'
+import { PaginatedList, PaginationQuery } from 'src/shared/dtos/paginating'
+import { ContainerConfigDto, UniqueKeyValueDto, UniqueSecretKeyValueDto } from '../container/container.dto'
+import { ImageDto } from '../image/image.dto'
+import { ImageEvent } from '../image/image.event'
+import { ImageDetails } from '../image/image.mapper'
 import {
   AuditDto,
   BasicNodeDto,
   BasicNodeWithStatus,
   BasicProductDto,
+  BasicProperties,
   BasicVersionDto,
   ContainerIdentifierDto,
 } from '../shared/shared.dto'
@@ -33,30 +38,36 @@ export class DeploymentDto extends BasicDeploymentDto {
   @IsOptional()
   note?: string | null
 
+  @ValidateNested()
   audit: AuditDto
 
+  @ValidateNested()
   product: BasicProductDto
 
+  @ValidateNested()
   version: BasicVersionDto
 
+  @ValidateNested()
   node: BasicNodeDto
 }
 
 export class DeploymentWithBasicNodeDto extends BasicDeploymentDto {
   @IsString()
   @IsOptional()
-  note?: string | null
+  note?: string
 
   @Type(() => Date)
   @IsDate()
   updatedAt: Date
 
+  @ValidateNested()
   node: BasicNodeWithStatus
 }
 
 export class InstanceContainerConfigDto extends OmitType(PartialType(ContainerConfigDto), ['secrets']) {
   @IsOptional()
-  secrets?: UniqueSecretKeyValue[] | null
+  @ValidateNested({ each: true })
+  secrets?: UniqueSecretKeyValueDto[]
 }
 
 export class InstanceDto {
@@ -67,6 +78,7 @@ export class InstanceDto {
   @IsDate()
   updatedAt: Date
 
+  @ValidateNested()
   image: ImageDto
 
   @ApiProperty({ enum: CONTAINER_STATE_VALUES })
@@ -75,17 +87,22 @@ export class InstanceDto {
   state?: ContainerState | null
 
   @IsOptional()
+  @ValidateNested()
   config?: InstanceContainerConfigDto | null
 }
 
 export class DeploymentDetailsDto extends DeploymentDto {
-  environment: UniqueKeyValue[]
+  @ValidateNested({ each: true })
+  environment: UniqueKeyValueDto[]
 
   @IsString()
   @IsOptional()
   publicKey?: string | null
 
+  @ValidateNested()
   instances: InstanceDto[]
+
+  lastTry: number
 }
 
 export class CreateDeploymentDto {
@@ -113,10 +130,12 @@ export class PatchDeploymentDto {
   prefix?: string | null
 
   @IsOptional()
-  environment?: UniqueKeyValue[]
+  @ValidateNested({ each: true })
+  environment?: UniqueKeyValueDto[] | null
 }
 
 export class PatchInstanceDto {
+  @ValidateNested()
   config: InstanceContainerConfigDto
 }
 
@@ -129,7 +148,8 @@ export class DeploymentEventContainerStateDto {
 
   @ApiProperty({ enum: CONTAINER_STATE_VALUES })
   @IsIn(CONTAINER_STATE_VALUES)
-  state: ContainerState
+  @IsOptional()
+  state?: ContainerState
 }
 
 export class DeploymentEventDto {
@@ -155,8 +175,10 @@ export class DeploymentEventDto {
 }
 
 export class InstanceSecretsDto {
+  @ValidateNested()
   container: ContainerIdentifierDto
 
+  @IsString()
   publicKey: string
 
   @IsOptional()
@@ -165,8 +187,41 @@ export class InstanceSecretsDto {
 }
 
 export class DeploymentLogListDto extends PaginatedList<DeploymentEventDto> {
-  @Type(() => DeploymentEventDto)
+  @ValidateNested({ each: true })
   items: DeploymentEventDto[]
 
+  @IsInt()
   total: number
+}
+
+export class DeploymentLogPaginationQuery extends PaginationQuery {
+  @IsInt()
+  @IsOptional()
+  @Type(() => Number)
+  @ApiProperty()
+  readonly try?: number
+}
+
+export type DeploymentImageEvent = ImageEvent & {
+  deploymentIds?: string[]
+  instances?: InstanceDetails[]
+}
+
+export type DeploymentWithNode = Deployment & {
+  node: Pick<Node, BasicProperties>
+}
+
+export type DeploymentWithNodeVersion = DeploymentWithNode & {
+  version: Pick<Version, BasicProperties> & {
+    product: Pick<Product, BasicProperties>
+  }
+}
+
+export type InstanceDetails = Instance & {
+  image: ImageDetails
+  config?: InstanceContainerConfig
+}
+
+export type DeploymentDetails = DeploymentWithNodeVersion & {
+  instances: InstanceDetails[]
 }

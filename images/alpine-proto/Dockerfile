@@ -1,6 +1,6 @@
 # this image is our official way of generating proto-files
 # for reproducable builds, anywhere
-FROM golang:1.20-alpine3.17
+FROM docker.io/library/golang:1.20-alpine3.17
 
 ENV GOLANGCI_LINT_CACHE $GOPATH/cache
 ENV GOCACHE $GOPATH/cache
@@ -32,3 +32,4 @@ RUN curl -L -o /usr/bin/kubectl "https://dl.k8s.io/release/$(curl -L -s https://
 WORKDIR /usr/work
 
 LABEL org.opencontainers.image.source="https://github.com/dyrector-io/dyrectorio/tree/develop/images/alpine-proto"
+

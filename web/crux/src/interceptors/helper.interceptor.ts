@@ -1,8 +1,8 @@
-import { Handler } from '@grpc/grpc-js/build/src/server-call'
+import { Handler, ServerSurfaceCall } from '@grpc/grpc-js/build/src/server-call'
 import { ExecutionContext, Injectable } from '@nestjs/common'
-import { IdentityAwareServerSurfaceCall } from 'src/shared/user-access.guard'
+import { Identity } from '@ory/kratos-client'
 
-type GrpcCallLog = {
+export type GrpcCallLog = {
   userId: string
   serviceCall: string
   data: any
@@ -37,4 +37,8 @@ type ServerCall = {
 
 type ServerCallStream = {
   handler: Handler<any, any>
+}
+
+type IdentityAwareServerSurfaceCall = ServerSurfaceCall & {
+  user: Identity
 }

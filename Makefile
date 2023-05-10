@@ -32,13 +32,23 @@ cli:
 	cd golang/cmd/dyo && \
 	go run .
 
-
+.PHONY: bundle
+bundle:
+	$(eval BUNDLEVER=$(or $(version),latest))
+	mv .env .env_bak || true
+	echo "DYO_VERSION=$(BUNDLEVER)" > .env
+	docker-compose --ansi=never pull  2> >(awk '!/level=warning/') >/dev/stdout
+	docker-compose config 2>/dev/null | yq -r '.services[].image' | sort | uniq | while read line ; do \
+	docker save $$line | gzip > "offline/$$(echo "$$line" | sed 's/\//\./g; s/\:/\_/g' | cut -d'.' -f3-).tgz" ; done
+	cp docker-compose.yaml offline/
+	cp .env.example offline/
+	zip -r dyrectorio-offline-bundle-$(BUNDLEVER).zip offline
+	mv .env_bak .env || true
 
 ## compile docs
 .PHONY: docs
 docs:
 	protoc -I. --doc_out=./docs --doc_opt=markdown,docs.md  proto/*.proto
-
 
 UID := $(shell id -u)
 GID := $(shell id -g)
@@ -47,15 +57,14 @@ REMOTE=github.com/dyrector-io/dyrectorio/protobuf/go
 
 ## Compile the all grpc files
 .PHONY: protogen
-protogen:| proto-agent proto-crux proto-crux-ui
-
-
+protogen:| proto-agent proto-crux
 
 ## Generate agent grpc files
 .PHONY: go-lint
 go-lint:
 	MSYS_NO_PATHCONV=1 docker run --rm -u ${UID}:${GID} -v ${PWD}:/usr/work ghcr.io/dyrector-io/dyrectorio/alpine-proto:3.17-3 ash -c "\
 		cd golang && make lint"
+
 ## Generate agent grpc files
 .PHONY: proto-agent
 proto-agent:
@@ -85,24 +94,6 @@ proto-crux:
 	cp -r protobuf/proto web/crux/ && \
 	cd ./web/crux/src/grpc && \
 	npx prettier -w "./**.ts"
-
-# Generate UI grpc files, note the single file
-.PHONY:  proto-crux-ui
-proto-crux-ui:
-	MSYS_NO_PATHCONV=1 docker run --rm -u ${UID}:${GID} -v ${PWD}:/usr/work ghcr.io/dyrector-io/dyrectorio/alpine-proto:3.17-3 ash -c "\
-		mkdir -p ./web/crux-ui/src/models/grpc && \
-		protoc \
-			--experimental_allow_proto3_optional \
-			--plugin=/usr/local/lib/node_modules/ts-proto/protoc-gen-ts_proto \
-			--ts_proto_opt=esModuleInterop=true \
-			--ts_proto_opt=outputJsonMethods=true \
-			--ts_proto_opt=useDate=false \
-			--ts_proto_opt=outputServices=grpc-js \
-			--ts_proto_out=./web/crux-ui/src/models/grpc \
-			--ts_proto_opt=initializeFieldsAsUndefined=false \
-			protobuf/proto/crux.proto" && \
-	cd ./web/crux-ui/src/models/grpc && \
-	npx prettier -w "**.ts"
 
 ## make wonders happen - build everything -  !!!  token `|` is for parallel execution
 .PHONY: all
@@ -144,10 +135,17 @@ release:
 	git commit -m "release: $(version)"
 	git tag -sm "$(version)" $(version)
 
+## Generating bundle
+	@echo "After the pipeline completes and the images are tagged run: 'make version=$(version) bundle' , upload the result to: https://github.com/dyrector-io/dyrectorio/releases"
+
 .PHONY: test-integration
 test-integration:
 	cd golang && \
 	make test-integration
+
+.PHONY: format
+format:
+	yamlfmt .
 
 ## Generate video with gource, needs ffmpeg and gource installed
 .PHONY: gource

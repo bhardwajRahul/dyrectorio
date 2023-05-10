@@ -1,10 +1,6 @@
-import { BadRequestException, Injectable } from '@nestjs/common'
+import { Injectable } from '@nestjs/common'
 import { Registry, RegistryTypeEnum } from '@prisma/client'
-import { InvalidArgumentException } from 'src/exception/errors'
-import {
-  RegistryType as ProtoRegistryType,
-  registryTypeFromJSON as protoRegistryTypeFromJSON,
-} from 'src/grpc/protobuf/proto/crux'
+import { CruxBadRequestException } from 'src/exception/crux-exception'
 import { REGISTRY_HUB_URL } from 'src/shared/const'
 import { BasicProperties } from '../shared/shared.dto'
 import {
@@ -85,7 +81,7 @@ export default class RegistryMapper {
           }
         : null
     if (!details) {
-      throw new InvalidArgumentException({
+      throw new CruxBadRequestException({
         message: 'Unknown registry type',
         property: 'type',
       })
@@ -169,16 +165,11 @@ export default class RegistryMapper {
       }
     }
 
-    throw new BadRequestException({
+    throw new CruxBadRequestException({
       message: 'Unknown registry type',
       property: 'type',
       value: request.type,
     })
-  }
-
-  // TODO(@robot9706): Required by ImageMapper, remove when ImageMapper is removed
-  typeToProto(type: RegistryTypeEnum): ProtoRegistryType {
-    return protoRegistryTypeFromJSON(type.toUpperCase())
   }
 }
 

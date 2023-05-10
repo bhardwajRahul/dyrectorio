@@ -5,44 +5,42 @@ import { DeploymentEventTypeEnum, DeploymentStatusEnum, NodeTypeEnum } from '@pr
 import { InjectMetric } from '@willsoto/nestjs-prometheus'
 import { Gauge } from 'prom-client'
 import {
+  EMPTY,
+  Observable,
+  Subject,
   catchError,
   concatAll,
   concatMap,
-  EMPTY,
   finalize,
   from,
   map,
-  Observable,
   of,
   startWith,
-  Subject,
   takeUntil,
 } from 'rxjs'
-import { Agent, AgentToken } from 'src/domain/agent'
+import { Agent, AgentEvent, AgentToken } from 'src/domain/agent'
 import AgentInstaller from 'src/domain/agent-installer'
 import Deployment, { DeploymentProgressEvent } from 'src/domain/deployment'
 import { DeployMessage, NotificationMessageType } from 'src/domain/notification-templates'
 import { collectChildVersionIds, collectParentVersionIds } from 'src/domain/utils'
-import { AlreadyExistsException, NotFoundException, UnauthenticatedException } from 'src/exception/errors'
+import { CruxConflictException, CruxNotFoundException, CruxUnauthorizedException } from 'src/exception/crux-exception'
 import { AgentAbortUpdate, AgentCommand, AgentInfo, CloseReason } from 'src/grpc/protobuf/proto/agent'
 import {
   ContainerIdentifier,
   ContainerLogMessage,
   ContainerStateListMessage,
   DeleteContainersRequest,
-  DeploymentStatus,
   DeploymentStatusMessage,
   Empty,
   ListSecretsResponse,
 } from 'src/grpc/protobuf/proto/common'
-import { NodeConnectionStatus, NodeEventMessage } from 'src/grpc/protobuf/proto/crux'
 import DomainNotificationService from 'src/services/domain.notification.service'
 import PrismaService from 'src/services/prisma.service'
 import GrpcNodeConnection from 'src/shared/grpc-node-connection'
 import { JWT_EXPIRATION } from '../../shared/const'
-import ImageMapper from '../image/image.mapper'
+import ContainerMapper from '../container/container.mapper'
 import { DagentTraefikOptionsDto, NodeScriptTypeDto } from '../node/node.dto'
-import ContainerMapper from '../shared/container.mapper'
+import { NodeConnectionStatus } from '../shared/shared.dto'
 
 @Injectable()
 export default class AgentService {
@@ -52,7 +50,7 @@ export default class AgentService {
 
   private agents: Map<string, Agent> = new Map()
 
-  private eventChannelByTeamId: Map<string, Subject<NodeEventMessage>> = new Map()
+  private eventChannelByTeamId: Map<string, Subject<AgentEvent>> = new Map()
 
   constructor(
     @InjectMetric('agent_online_count') private agentCount: Gauge<string>,
@@ -61,7 +59,6 @@ export default class AgentService {
     private configService: ConfigService,
     private notificationService: DomainNotificationService,
     private containerMapper: ContainerMapper,
-    private imageMapper: ImageMapper,
   ) {}
 
   getById(id: string): Agent {
@@ -71,7 +68,7 @@ export default class AgentService {
   getByIdOrThrow(id: string): Agent {
     const agent = this.getById(id)
     if (!agent) {
-      throw new NotFoundException({
+      throw new CruxNotFoundException({
         message: 'Agent not found',
         property: 'agent',
         value: id,
@@ -92,7 +89,7 @@ export default class AgentService {
     return installer
   }
 
-  async getNodeEventsByTeam(teamId: string): Promise<Subject<NodeEventMessage>> {
+  async getNodeEventsByTeam(teamId: string): Promise<Subject<AgentEvent>> {
     const team = await this.prisma.team.findUniqueOrThrow({
       where: {
         id: teamId,
@@ -111,7 +108,7 @@ export default class AgentService {
     return channel
   }
 
-  async sendNodeEventToTeam(teamId: string, event: NodeEventMessage) {
+  async sendNodeEventToTeam(teamId: string, event: AgentEvent) {
     const channel = await this.getNodeEventsByTeam(teamId)
     channel.next(event)
   }
@@ -130,7 +127,7 @@ export default class AgentService {
 
       const token: AgentToken = {
         iat: Math.floor(now / 1000),
-        iss: undefined,
+        iss: undefined, // this gets filled by JwtService by the sign() call
         sub: nodeId,
       }
 
@@ -160,7 +157,7 @@ export default class AgentService {
 
   async discardInstaller(nodeId: string): Promise<Empty> {
     if (!this.installers.has(nodeId)) {
-      throw new NotFoundException({
+      throw new CruxNotFoundException({
         message: 'Installer not found',
         property: 'installer',
         value: nodeId,
@@ -200,7 +197,7 @@ export default class AgentService {
         this.logger.verbose(`Deployment update - ${deploymentId}`)
 
         const events = deployment.onUpdate(it)
-        return from(this.createDeploymentEvents(deployment.id, events)).pipe(map(() => Empty))
+        return from(this.createDeploymentEvents(deployment.id, deployment.tries, events)).pipe(map(() => Empty))
       }),
       catchError(async (err: Error) => {
         this.logger.error(`Error during deployment: ${err.message}`, err.stack)
@@ -211,7 +208,7 @@ export default class AgentService {
         this.onDeploymentFinished(agent.id, deployment, status)
 
         const messageType: NotificationMessageType =
-          deployment.getStatus() === DeploymentStatus.SUCCESSFUL ? 'successfulDeploy' : 'failedDeploy'
+          deployment.getStatus() === 'successful' ? 'successfulDeploy' : 'failedDeploy'
         await this.notificationService.sendNotification({
           identityId: deployment.notification.accessedBy,
           messageType,
@@ -227,14 +224,14 @@ export default class AgentService {
     )
   }
 
-  handleContainerStatus(
+  handleContainerState(
     connection: GrpcNodeConnection,
     request: Observable<ContainerStateListMessage>,
   ): Observable<Empty> {
     const agent = this.getByIdOrThrow(connection.nodeId)
     const prefix = connection.getMetaData(GrpcNodeConnection.META_FILTER_PREFIX)
 
-    const [watcher, completer] = agent.onContainerStatusStreamStarted(prefix)
+    const [watcher, completer] = agent.onContainerStateStreamStarted(prefix)
     if (!watcher) {
       this.logger.warn(`${agent.id} - There was no watcher for ${prefix}`)
 
@@ -334,8 +331,9 @@ export default class AgentService {
   }
 
   private async onAgentConnectionStatusChange(agent: Agent, status: NodeConnectionStatus) {
-    if (status === NodeConnectionStatus.UNREACHABLE) {
+    if (status === 'unreachable') {
       this.logger.log(`Left: ${agent.id}`)
+      agent.onDisconnected()
       this.agents.delete(agent.id)
       this.agentCount.dec()
 
@@ -348,7 +346,7 @@ export default class AgentService {
           status: DeploymentStatusEnum.failed,
         },
       })
-    } else if (status === NodeConnectionStatus.CONNECTED) {
+    } else if (status === 'connected') {
       this.agentCount.inc()
       agent.onConnected()
     } else {
@@ -363,7 +361,7 @@ export default class AgentService {
     if (this.agents.has(request.id)) {
       const agent = this.agents.get(request.id)
       if (!agent.updating) {
-        throw new AlreadyExistsException({
+        throw new CruxConflictException({
           message: 'Agent is already connected.',
           property: 'id',
         })
@@ -388,7 +386,7 @@ export default class AgentService {
       const installer = this.installers.get(node.id)
       if (installer) {
         if (installer.token !== connection.jwt) {
-          throw new UnauthenticatedException({
+          throw new CruxUnauthorizedException({
             message: 'Invalid token',
           })
         }
@@ -406,11 +404,11 @@ export default class AgentService {
         })
       } else {
         if (!node.token || node.token !== connection.jwt) {
-          throw new UnauthenticatedException({
+          throw new CruxUnauthorizedException({
             message: 'Invalid token',
           })
         }
-        agent = new Agent(connection, request, eventChannel as Subject<NodeEventMessage>)
+        agent = new Agent(connection, request, eventChannel)
 
         await prisma.node.update({
           where: { id: node.id },
@@ -434,7 +432,7 @@ export default class AgentService {
     return agent.onConnected()
   }
 
-  private async createDeploymentEvents(id: string, events: DeploymentProgressEvent[]) {
+  private async createDeploymentEvents(id: string, tryCount: number, events: DeploymentProgressEvent[]) {
     const statusChanges = events.filter(it => it.type === DeploymentEventTypeEnum.deploymentStatus)
     if (statusChanges.length > 0) {
       const last = statusChanges[statusChanges.length - 1]
@@ -452,11 +450,12 @@ export default class AgentService {
       data: events.map(it => ({
         ...it,
         deploymentId: id,
+        tryCount,
       })),
     })
   }
 
-  private async onDeploymentFinished(nodeId: string, finishedDeployment: Deployment, status: DeploymentStatus) {
+  private async onDeploymentFinished(nodeId: string, finishedDeployment: Deployment, status: DeploymentStatusEnum) {
     const deployment = await this.prisma.deployment.findUniqueOrThrow({
       select: {
         status: true,
@@ -481,7 +480,7 @@ export default class AgentService {
       },
     })
 
-    const finalStatus = status === DeploymentStatus.SUCCESSFUL ? 'successful' : 'failed'
+    const finalStatus = status === 'successful' ? 'successful' : 'failed'
 
     if (deployment.status !== finalStatus) {
       // update status for sure
@@ -557,7 +556,7 @@ export default class AgentService {
 
       const configUpserts = Array.from(finishedDeployment.mergedConfigs).map(it => {
         const [key, config] = it
-        const dbConfig = this.imageMapper.containerConfigDataToDb(config)
+        const dbConfig = this.containerMapper.configDataToDb(config)
 
         return prisma.instanceContainerConfig.upsert({
           where: {

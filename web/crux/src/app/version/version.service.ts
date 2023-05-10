@@ -1,27 +1,94 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, Logger } from '@nestjs/common'
 import { Identity } from '@ory/kratos-client'
-import { DeploymentStatusEnum } from '@prisma/client'
+import { DeploymentStatusEnum, Prisma } from '@prisma/client'
 import { VersionMessage } from 'src/domain/notification-templates'
 import DomainNotificationService from 'src/services/domain.notification.service'
 import PrismaService from 'src/services/prisma.service'
 import AgentService from '../agent/agent.service'
+import { EditorLeftMessage, EditorMessage } from '../editor/editor.message'
+import EditorServiceProvider from '../editor/editor.service.provider'
 import ImageMapper from '../image/image.mapper'
-import { CreateVersionDto, IncreaseVersionDto, UpdateVersionDto, VersionDetailsDto, VersionDto } from './version.dto'
+import {
+  CreateVersionDto,
+  IncreaseVersionDto,
+  UpdateVersionDto,
+  VersionDetailsDto,
+  VersionDto,
+  VersionListQuery,
+} from './version.dto'
 import VersionMapper from './version.mapper'
-import SharedMapper from '../shared/shared.mapper'
 
 @Injectable()
 export default class VersionService {
+  private readonly logger = new Logger(VersionService.name)
+
   constructor(
     private prisma: PrismaService,
     private mapper: VersionMapper,
     private imageMapper: ImageMapper,
     private notificationService: DomainNotificationService,
     private agentService: AgentService,
-    private sharedMapper: SharedMapper,
+    private readonly editorServices: EditorServiceProvider,
   ) {}
 
-  async getVersionsByProductId(productId: string, user: Identity): Promise<VersionDto[]> {
+  async checkProductOrVersionIsInTheActiveTeam(
+    productId: string,
+    versionId: string | null,
+    identity: Identity,
+  ): Promise<boolean> {
+    const versions = await this.prisma.product.count({
+      where: {
+        id: productId,
+        team: {
+          users: {
+            some: {
+              userId: identity.id,
+              active: true,
+            },
+          },
+        },
+        versions: !versionId
+          ? undefined
+          : {
+              some: {
+                id: versionId,
+              },
+            },
+      },
+    })
+
+    return versions > 0
+  }
+
+  async checkVersionIsInTheActiveTeam(versionId: string, identity: Identity): Promise<boolean> {
+    const versions = await this.prisma.version.count({
+      where: {
+        id: versionId,
+        product: {
+          team: {
+            users: {
+              some: {
+                userId: identity.id,
+                active: true,
+              },
+            },
+          },
+        },
+      },
+    })
+
+    return versions > 0
+  }
+
+  async getVersionsByProductId(productId: string, user: Identity, query?: VersionListQuery): Promise<VersionDto[]> {
+    const filter: Prisma.VersionWhereInput = {
+      name: query?.nameContains
+        ? {
+            contains: query.nameContains,
+          }
+        : undefined,
+    }
+
     const versions = await this.prisma.version.findMany({
       include: {
         children: true,
@@ -39,6 +106,7 @@ export default class VersionService {
             },
           },
         },
+        ...filter,
       },
     })
 
@@ -79,7 +147,7 @@ export default class VersionService {
     const statusLookup = new Map(
       [...nodes].map(it => {
         const node = this.agentService.getById(it)
-        const status = node ? this.sharedMapper.nodeStatusToDto(node.getConnectionStatus()) : 'unreachable'
+        const status = node?.getConnectionStatus() ?? 'unreachable'
         return [it, status]
       }),
     )
@@ -137,9 +205,9 @@ export default class VersionService {
       })
 
       if (defaultVersion) {
-        const images = defaultVersion.images.map(
-          async image =>
-            await prisma.image.create({
+        const newImages = await Promise.all(
+          defaultVersion.images.map(async image => {
+            const newImage = await prisma.image.create({
               select: {
                 id: true,
               },
@@ -154,8 +222,20 @@ export default class VersionService {
                   },
                 },
               },
-            }),
+            })
+
+            return [image.id, newImage.id]
+          }),
         )
+
+        const imageMap = newImages.reduce((prev, current) => {
+          const [imageId, newImageId] = current
+
+          return {
+            ...prev,
+            [imageId]: newImageId,
+          }
+        }, {})
 
         const deployments = await Promise.all(
           defaultVersion.deployments.map(async deployment => {
@@ -184,6 +264,7 @@ export default class VersionService {
                     ...it,
                     id: undefined,
                     deploymentId: newDeployment.id,
+                    imageId: imageMap[it.imageId],
                     config: it.config
                       ? {
                           create: {
@@ -199,7 +280,6 @@ export default class VersionService {
           }),
         )
 
-        await Promise.all(images)
         await Promise.all(deployments)
       }
 
@@ -413,6 +493,7 @@ export default class VersionService {
 
       return version
     }) // End of Prisma transaction
+
     await this.notificationService.sendNotification({
       identityId: identity.id,
       messageType: 'version',
@@ -420,5 +501,29 @@ export default class VersionService {
     })
 
     return this.mapper.toDto(increasedVersion)
+  }
+
+  async onEditorJoined(
+    versionId: string,
+    clientToken: string,
+    identity: Identity,
+  ): Promise<[EditorMessage, EditorMessage[]]> {
+    const editors = await this.editorServices.getOrCreateService(versionId)
+
+    const me = editors.onClientJoin(clientToken, identity)
+
+    return [me, editors.getEditors()]
+  }
+
+  async onEditorLeft(versionId: string, clientToken: string): Promise<EditorLeftMessage> {
+    const editors = await this.editorServices.getOrCreateService(versionId)
+    const message = editors.onClientLeft(clientToken)
+
+    if (editors.editorCount < 1) {
+      this.logger.verbose(`All editors left removing ${versionId}`)
+      this.editorServices.free(versionId)
+    }
+
+    return message
   }
 }

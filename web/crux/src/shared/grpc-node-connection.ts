@@ -2,9 +2,9 @@ import { Metadata } from '@grpc/grpc-js'
 import { HandlerType, ServerSurfaceCall } from '@grpc/grpc-js/build/src/server-call'
 import { JwtService } from '@nestjs/jwt'
 import { Observable, Subject } from 'rxjs'
+import { NodeConnectionStatus } from 'src/app/shared/shared.dto'
 import { AgentToken } from 'src/domain/agent'
-import { InvalidArgumentException } from 'src/exception/errors'
-import { NodeConnectionStatus } from 'src/grpc/protobuf/proto/crux'
+import { CruxBadRequestException } from 'src/exception/crux-exception'
 
 const nestjsClientStreamEndCallWorkaround = () => {}
 export default class GrpcNodeConnection {
@@ -64,7 +64,7 @@ export default class GrpcNodeConnection {
   getMetaData(key: string): string {
     const value = this.metadata.getMap()[key]
     if (typeof value !== 'string') {
-      throw new InvalidArgumentException({
+      throw new CruxBadRequestException({
         message: 'Missing metadata.',
         property: key,
       })
@@ -78,7 +78,7 @@ export default class GrpcNodeConnection {
     if (key in map) {
       const value = map[key]
       if (typeof value !== 'string') {
-        throw new InvalidArgumentException({
+        throw new CruxBadRequestException({
           message: 'Missing metadata.',
           property: key,
         })
@@ -91,7 +91,7 @@ export default class GrpcNodeConnection {
   }
 
   private onClose() {
-    this.statusChannel.next(NodeConnectionStatus.UNREACHABLE)
+    this.statusChannel.next('unreachable')
 
     this.call.removeAllListeners()
     this.statusChannel.complete()

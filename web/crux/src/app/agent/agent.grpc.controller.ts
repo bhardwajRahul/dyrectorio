@@ -1,12 +1,13 @@
 import { Metadata } from '@grpc/grpc-js'
-import { Controller, UseGuards, UseInterceptors } from '@nestjs/common'
+import { Controller, UseFilters, UseGuards, UseInterceptors } from '@nestjs/common'
 import { Observable } from 'rxjs'
+import GrpcExceptionFilter from 'src/filters/grpc.exception-filter'
 import {
   AgentAbortUpdate,
   AgentCommand,
-  AgentController as GrpcAgentController,
   AgentControllerMethods,
   AgentInfo,
+  AgentController as GrpcAgentController,
 } from 'src/grpc/protobuf/proto/agent'
 import {
   ContainerLogMessage,
@@ -16,8 +17,6 @@ import {
   Empty,
   ListSecretsResponse,
 } from 'src/grpc/protobuf/proto/common'
-import GrpcErrorInterceptor from 'src/interceptors/grpc.error.interceptor'
-import GrpcLoggerInterceptor from 'src/interceptors/grpc.logger.interceptor'
 import PrismaErrorInterceptor from 'src/interceptors/prisma-error-interceptor'
 import { NodeGrpcCall } from 'src/shared/grpc-node-connection'
 import AgentService from './agent.service'
@@ -25,8 +24,9 @@ import AgentAuthGuard from './guards/agent.auth.guard'
 
 @Controller()
 @AgentControllerMethods()
+@UseFilters(GrpcExceptionFilter)
 @UseGuards(AgentAuthGuard)
-@UseInterceptors(GrpcLoggerInterceptor, GrpcErrorInterceptor, PrismaErrorInterceptor)
+@UseInterceptors(PrismaErrorInterceptor)
 export default class AgentController implements GrpcAgentController {
   constructor(private service: AgentService) {}
 
@@ -38,8 +38,8 @@ export default class AgentController implements GrpcAgentController {
     return this.service.handleDeploymentStatus(call.connection, request)
   }
 
-  containerState(request: Observable<ContainerStateListMessage>, _: Metadata, call): Observable<Empty> {
-    return this.service.handleContainerStatus(call.connection, request)
+  containerState(request: Observable<ContainerStateListMessage>, _: Metadata, call: NodeGrpcCall): Observable<Empty> {
+    return this.service.handleContainerState(call.connection, request)
   }
 
   secretList(request: ListSecretsResponse, _: Metadata, call: NodeGrpcCall): Observable<Empty> {

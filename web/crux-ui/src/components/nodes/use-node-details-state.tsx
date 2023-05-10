@@ -5,21 +5,22 @@ import useWebSocket from '@app/hooks/use-websocket'
 import {
   Container,
   ContainerCommandMessage,
-  ContainerListMessage,
   ContainerOperation,
   containerPrefixNameOf,
+  ContainersStateListMessage,
   ContainerState,
   DeleteContainerMessage,
   NodeDetails,
+  WatchContainerStatusMessage,
+  WS_TYPE_CONTAINERS_STATE_LIST,
   WS_TYPE_CONTAINER_COMMAND,
-  WS_TYPE_CONTAINER_STATUS_LIST,
   WS_TYPE_DELETE_CONTAINER,
-  WS_TYPE_WATCH_CONTAINER_STATUS,
+  WS_TYPE_WATCH_CONTAINERS_STATE,
 } from '@app/models'
 import { nodeWsUrl } from '@app/routes'
 import { utcDateToLocale } from '@app/utils'
 import useTranslation from 'next-translate/useTranslation'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { PaginationSettings } from '../shared/paginator'
 import useNodeState from './use-node-state'
 
@@ -75,17 +76,26 @@ const useNodeDetailsState = (options: NodeDetailsStateOptions): [NodeDetailsStat
     ],
   })
 
-  const sock = useWebSocket(nodeWsUrl(node.id), {
-    onOpen: () => sock.send(WS_TYPE_WATCH_CONTAINER_STATUS, {}),
-  })
+  const sock = useWebSocket(nodeWsUrl(node.id))
+  useEffect(() => {
+    if (node.status === 'connected') {
+      sock.send(WS_TYPE_WATCH_CONTAINERS_STATE, { prefix: '' } as WatchContainerStatusMessage)
+    }
+  }, [node.status, sock])
 
-  sock.on(WS_TYPE_CONTAINER_STATUS_LIST, (message: ContainerListMessage) => {
-    filters.setItems(message)
+  useEffect(() => {
+    if (node.status !== 'connected' && filters.items.length > 0) {
+      filters.setItems([])
+    }
+  }, [node.status, filters])
+
+  sock.on(WS_TYPE_CONTAINERS_STATE_LIST, (message: ContainersStateListMessage) => {
+    filters.setItems(message.containers)
 
     const newTargetStates = {
       ...containerTargetStates,
     }
-    message.forEach(container => {
+    message.containers.forEach(container => {
       const { state } = container
       const name = containerPrefixNameOf(container.id)
 

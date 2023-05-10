@@ -1,9 +1,9 @@
-import { Version, VersionTypeEnum } from '.prisma/client'
+import { Version } from '.prisma/client'
 import { Injectable } from '@nestjs/common'
 import { ProductTypeEnum } from '@prisma/client'
 import { versionIsDeletable, versionIsIncreasable, versionIsMutable } from 'src/domain/version'
-import { VersionType, versionTypeToJSON } from 'src/grpc/protobuf/proto/crux'
-import DeployMapper, { DeploymentWithNode } from '../deploy/deploy.mapper'
+import { DeploymentWithNode } from '../deploy/deploy.dto'
+import DeployMapper from '../deploy/deploy.mapper'
 import ImageMapper, { ImageDetails } from '../image/image.mapper'
 import { NodeConnectionStatus } from '../shared/shared.dto'
 import SharedMapper from '../shared/shared.mapper'
@@ -45,10 +45,6 @@ export default class VersionMapper {
         this.deployMapper.toDeploymentWithBasicNodeDto(it, nodeStatusLookup.get(it.nodeId)),
       ),
     }
-  }
-
-  typeToDb(type: VersionType): VersionTypeEnum {
-    return versionTypeToJSON(type).toLowerCase() as VersionTypeEnum
   }
 }
 

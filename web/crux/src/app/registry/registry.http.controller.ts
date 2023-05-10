@@ -1,24 +1,19 @@
-import {
-  Controller,
-  Get,
-  HttpCode,
-  PipeTransform,
-  Type,
-  UseGuards,
-  UseInterceptors,
-  UsePipes,
-  ValidationPipe,
-} from '@nestjs/common'
+import { Controller, Get, HttpCode, PipeTransform, Type, UseGuards, UseInterceptors } from '@nestjs/common'
 import { Delete, Post, Put } from '@nestjs/common/decorators/http/request-mapping.decorator'
 import { Body, Param } from '@nestjs/common/decorators/http/route-params.decorator'
-import { ApiBody, ApiCreatedResponse, ApiNoContentResponse, ApiOkResponse, ApiTags } from '@nestjs/swagger'
+import {
+  ApiBody,
+  ApiOperation,
+  ApiCreatedResponse,
+  ApiNoContentResponse,
+  ApiOkResponse,
+  ApiTags,
+} from '@nestjs/swagger'
 import { Identity } from '@ory/kratos-client'
-import HttpLoggerInterceptor from 'src/interceptors/http.logger.interceptor'
-import PrismaErrorInterceptor from 'src/interceptors/prisma-error-interceptor'
+import UuidParams from 'src/decorators/api-params.decorator'
 import { API_CREATED_LOCATION_HEADERS } from 'src/shared/const'
 import { CreatedResponse, CreatedWithLocation } from '../shared/created-with-location.decorator'
-import CreatedWithLocationInterceptor from '../shared/created-with-location.interceptor'
-import JwtAuthGuard, { IdentityFromRequest } from '../token/jwt-auth.guard'
+import { IdentityFromRequest } from '../token/jwt-auth.guard'
 import RegistryAccessValidationGuard from './guards/registry.auth.validation.guard'
 import RegistryTeamAccessGuard from './guards/registry.team-access.guard'
 import UpdateRegistryInterceptor from './interceptors/registry.update.interceptor'
@@ -26,34 +21,39 @@ import DeleteRegistryValidationPipe from './pipes/registry.delete.pipe'
 import { CreateRegistryDto, RegistryDetailsDto, RegistryDto, UpdateRegistryDto } from './registry.dto'
 import RegistryService from './registry.service'
 
-const RegistryId = (...pipes: (Type<PipeTransform> | PipeTransform)[]) => Param('registryId', ...pipes)
+const PARAM_REGISTRY_ID = 'registryId'
+const RegistryId = (...pipes: (Type<PipeTransform> | PipeTransform)[]) => Param(PARAM_REGISTRY_ID, ...pipes)
 
 const ROUTE_REGISTRIES = 'registries'
 const ROUTE_REGISTRY_ID = ':registryId'
 
 @Controller(ROUTE_REGISTRIES)
 @ApiTags(ROUTE_REGISTRIES)
-@UsePipes(
-  new ValidationPipe({
-    // TODO(@robot9706): Move to global pipes after removing gRPC
-    transform: true,
-  }),
-)
-@UseInterceptors(HttpLoggerInterceptor, PrismaErrorInterceptor, CreatedWithLocationInterceptor)
-@UseGuards(JwtAuthGuard, RegistryTeamAccessGuard)
+@UseGuards(RegistryTeamAccessGuard)
 export default class RegistryHttpController {
   constructor(private service: RegistryService) {}
 
   @Get()
   @HttpCode(200)
-  @ApiOkResponse({ type: RegistryDto, isArray: true })
+  @ApiOperation({
+    description:
+      'Lists every registries available in the active team. Response is an array including the `name`, `id`, `type`, `description`, and `icon` of the registry.</br></br>Registries are 3rd party registries where the container images are stored.',
+    summary: 'Fetch data of registries.',
+  })
+  @ApiOkResponse({ type: RegistryDto, isArray: true, description: 'Data of all registries within a team listed.' })
   async getRegistries(@IdentityFromRequest() identity: Identity): Promise<RegistryDto[]> {
     return await this.service.getRegistries(identity)
   }
 
   @Get(ROUTE_REGISTRY_ID)
   @HttpCode(200)
-  @ApiOkResponse({ type: RegistryDetailsDto })
+  @ApiOperation({
+    description:
+      "Lists the details of a registry. `registryId` refers to the registry's ID. Response is an array including the `name`, `id`, `type`, `description`, `imageNamePrefix`, `inUse`, `icon`, and audit log info of the registry.",
+    summary: 'Fetch data of a registry.',
+  })
+  @ApiOkResponse({ type: RegistryDetailsDto, description: 'Data of a registry listed.' })
+  @UuidParams(PARAM_REGISTRY_ID)
   async getRegistry(@RegistryId() id: string): Promise<RegistryDetailsDto> {
     return await this.service.getRegistryDetails(id)
   }
@@ -61,10 +61,16 @@ export default class RegistryHttpController {
   @Post()
   @HttpCode(201)
   @CreatedWithLocation()
+  @ApiOperation({
+    description:
+      'To add a new registry, include the `name`, `type`, `description`, `details`, and `icon`. `Type`, `details`, and `name` are required. Response is an array including the `name`, `id`, `type`, `description`, `imageNamePrefix`, `inUse`, `icon`, and audit log info of the registry.',
+    summary: 'Create a new registry.',
+  })
   @ApiBody({ type: CreateRegistryDto })
   @ApiCreatedResponse({
     type: RegistryDetailsDto,
     headers: API_CREATED_LOCATION_HEADERS,
+    description: 'New registry created.',
   })
   @UseGuards(RegistryAccessValidationGuard)
   async createRegistry(
@@ -81,10 +87,16 @@ export default class RegistryHttpController {
 
   @Put(ROUTE_REGISTRY_ID)
   @HttpCode(204)
+  @ApiOperation({
+    description:
+      "Modify the `name`, `type`, `description`, `details`, and `icon`. `registryId` refers to the registry's ID. `registryId`, `type`, `details`, and `name` are required.",
+    summary: 'Modify the details of a registry.',
+  })
   @UseInterceptors(UpdateRegistryInterceptor)
   @UseGuards(RegistryAccessValidationGuard)
   @ApiBody({ type: UpdateRegistryDto })
-  @ApiNoContentResponse()
+  @ApiNoContentResponse({ description: 'Registry modified.' })
+  @UuidParams(PARAM_REGISTRY_ID)
   async updateRegistry(
     @RegistryId() id: string,
     @Body() request: UpdateRegistryDto,
@@ -95,7 +107,12 @@ export default class RegistryHttpController {
 
   @Delete(ROUTE_REGISTRY_ID)
   @HttpCode(204)
-  @ApiNoContentResponse()
+  @ApiOperation({
+    description: 'Deletes a registry with the specified `registryId`',
+    summary: 'Delete a registry from dyrectorio.',
+  })
+  @ApiNoContentResponse({ description: 'Registry deleted.' })
+  @UuidParams(PARAM_REGISTRY_ID)
   async deleteRegistry(@RegistryId(DeleteRegistryValidationPipe) id: string): Promise<void> {
     await this.service.deleteRegistry(id)
   }

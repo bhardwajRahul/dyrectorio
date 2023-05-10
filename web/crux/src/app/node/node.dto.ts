@@ -1,13 +1,13 @@
 import { ApiProperty } from '@nestjs/swagger'
 import { Type } from 'class-transformer'
 import { IsBoolean, IsDate, IsEmail, IsIn, IsObject, IsOptional, IsString, ValidateNested } from 'class-validator'
-import { ContainerState } from 'src/shared/models'
+import { ContainerState } from 'src/domain/container'
 import {
   BasicNodeDto,
-  NodeConnectionStatus,
-  NodeType,
   NODE_CONNECTION_STATUS_VALUES,
   NODE_TYPE_VALUES,
+  NodeConnectionStatus,
+  NodeType,
 } from '../shared/shared.dto'
 
 export const NODE_SCRIPT_TYPE_VALUES = ['shell', 'powershell'] as const
@@ -151,7 +151,7 @@ export class ContainerPort {
   external: number
 }
 
-export class ContainerStatus {
+export class ContainerDto {
   id: ContainerIdentifierDto
 
   command: string

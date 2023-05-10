@@ -1,19 +1,20 @@
-import {
-  CallHandler,
-  ConflictException,
-  ExecutionContext,
-  Injectable,
-  NestInterceptor,
-  PreconditionFailedException,
-} from '@nestjs/common'
+import { CallHandler, ExecutionContext, Injectable, Logger, NestInterceptor } from '@nestjs/common'
 import { Observable } from 'rxjs'
+import RecaptchaService from 'src/app/shared/recaptcha.service'
+import {
+  CruxBadRequestException,
+  CruxConflictException,
+  CruxInternalServerErrorException,
+} from 'src/exception/crux-exception'
 import KratosService from 'src/services/kratos.service'
 import PrismaService from 'src/services/prisma.service'
-import RecaptchaService from 'src/app/shared/recaptcha.service'
+import { UserInvitationStatusEnum } from '@prisma/client'
 import { InviteUserDto } from '../team.dto'
 
 @Injectable()
 export default class TeamInviteUserValitationInterceptor implements NestInterceptor {
+  private readonly logger = new Logger()
+
   constructor(private prisma: PrismaService, private kratos: KratosService, private recaptcha: RecaptchaService) {}
 
   async intercept(context: ExecutionContext, next: CallHandler): Promise<Observable<any>> {
@@ -29,16 +30,19 @@ export default class TeamInviteUserValitationInterceptor implements NestIntercep
 
     if (this.recaptcha.captchaEnabled()) {
       if (!body.captcha) {
-        throw new PreconditionFailedException('Missing captcha')
+        throw new CruxBadRequestException({ message: 'Missing captcha.', property: 'captcha' })
       }
 
+      let captchaValid = false
       try {
-        const captchaValid = await this.recaptcha.validateCaptcha(body.captcha)
-        if (!captchaValid) {
-          throw new PreconditionFailedException('Invalid captcha')
-        }
+        captchaValid = await this.recaptcha.validateCaptcha(body.captcha)
       } catch (err) {
-        throw new PreconditionFailedException(`Failed to validate captcha: ${err}`)
+        this.logger.error(err)
+        throw new CruxInternalServerErrorException({ message: `Failed to validate captcha.`, property: 'captcha' })
+      }
+
+      if (!captchaValid) {
+        throw new CruxBadRequestException({ message: 'Invalid captcha.', property: 'captcha' })
       }
     }
 
@@ -50,8 +54,24 @@ export default class TeamInviteUserValitationInterceptor implements NestIntercep
     })
 
     if (userOnTeam) {
-      throw new ConflictException({
+      throw new CruxConflictException({
         message: 'User is already in the team',
+        property: 'email',
+      })
+    }
+
+    const invitation = await this.prisma.userInvitation.count({
+      where: {
+        userId: user.id,
+        teamId,
+        email: body.email,
+        status: UserInvitationStatusEnum.pending,
+      },
+      take: 1,
+    })
+    if (invitation > 0) {
+      throw new CruxConflictException({
+        message: 'User is already invited',
         property: 'email',
       })
     }

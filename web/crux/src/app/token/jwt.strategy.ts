@@ -1,8 +1,9 @@
-import { ExtractJwt, Strategy } from 'passport-jwt'
-import { PassportStrategy } from '@nestjs/passport'
-import { Injectable, UnauthorizedException } from '@nestjs/common'
+import { Injectable } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
-import { AuthPayload } from 'src/shared/models'
+import { PassportStrategy } from '@nestjs/passport'
+import { ExtractJwt, Strategy } from 'passport-jwt'
+import { AuthPayload } from 'src/domain/identity'
+import { CruxUnauthorizedException } from 'src/exception/crux-exception'
 import PrismaService from 'src/services/prisma.service'
 
 @Injectable()
@@ -34,7 +35,7 @@ export default class JwtStrategy extends PassportStrategy(Strategy) {
 
     // Validate that the user has not revoked the token.
     if (!token) {
-      throw new UnauthorizedException()
+      throw new CruxUnauthorizedException()
     }
 
     return payload

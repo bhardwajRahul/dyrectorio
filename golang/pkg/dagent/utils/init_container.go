@@ -7,9 +7,9 @@ import (
 
 	v1 "github.com/dyrector-io/dyrectorio/golang/api/v1"
 	"github.com/dyrector-io/dyrectorio/golang/internal/dogger"
+	dockerHelper "github.com/dyrector-io/dyrectorio/golang/internal/helper/docker"
 	"github.com/dyrector-io/dyrectorio/golang/internal/util"
 	containerbuilder "github.com/dyrector-io/dyrectorio/golang/pkg/builder/container"
-	dockerHelper "github.com/dyrector-io/dyrectorio/golang/pkg/helper/docker"
 	"github.com/dyrector-io/dyrectorio/protobuf/go/common"
 
 	"github.com/docker/docker/api/types/mount"
@@ -30,8 +30,8 @@ func spawnInitContainer(
 	targetVolumes := []mount.Mount{}
 
 	for _, v := range cont.Volumes {
-		linkedVolume, ok := mountMap[v.Name]
-		if !ok {
+		linkedVolume := FindVolumeInMountMap(v.Name, mountMap)
+		if linkedVolume == nil {
 			return fmt.Errorf("linked volume not found: %s", v.Name)
 		}
 		targetVolumes = append(targetVolumes,

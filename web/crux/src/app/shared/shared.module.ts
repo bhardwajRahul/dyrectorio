@@ -1,12 +1,14 @@
 import { Module } from '@nestjs/common'
-import ContainerMapper from './container.mapper'
-import SharedMapper from './shared.mapper'
+import PrismaService from 'src/services/prisma.service'
+import TeamRepository from '../team/team.repository'
 import RecaptchaService from './recaptcha.service'
+import SharedMapper from './shared.mapper'
+import AuditLoggerService from './audit.logger.service'
 
 @Module({
   imports: [],
-  exports: [ContainerMapper, SharedMapper, RecaptchaService],
+  exports: [SharedMapper, RecaptchaService, TeamRepository, AuditLoggerService],
   controllers: [],
-  providers: [ContainerMapper, SharedMapper, RecaptchaService],
+  providers: [SharedMapper, RecaptchaService, PrismaService, TeamRepository, AuditLoggerService],
 })
 export default class SharedModule {}

@@ -7,17 +7,10 @@ http:
         - web
 
     crux:
-      rule: (Host(`localhost`) || Host(`{{.InternalHost}}`)) && PathPrefix(`/api/new`)
+      rule: (Host(`localhost`) || Host(`{{.InternalHost}}`)) && (PathPrefix(`/api`) && !PathPrefix(`/api/auth`) && !PathPrefix(`/api/status`))
       service: crux
       entryPoints:
         - web
-      middlewares:
-        - crux-strip-prefix
-
-  middlewares:
-    crux-strip-prefix:
-      stripprefix:
-        prefixes: /api/new
 
   services:
     crux-ui:

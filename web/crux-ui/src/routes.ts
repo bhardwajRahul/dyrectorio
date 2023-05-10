@@ -46,33 +46,33 @@ export const API_CREATE_ACCOUNT = '/api/auth/create-account'
 
 export const API_STATUS = '/api/status'
 
-export const API_REGISTRIES = '/api/new/registries'
-export const API_PRODUCTS = '/api/new/products'
-export const API_NODES = '/api/new/nodes'
-export const API_DEPLOYMENTS = '/api/new/deployments'
+export const API_REGISTRIES = '/api/registries'
+export const API_PRODUCTS = '/api/products'
+export const API_NODES = '/api/nodes'
+export const API_DEPLOYMENTS = '/api/deployments'
 
-export const API_TEAMS = '/api/new/teams'
-export const API_USERS_ME = '/api/new/users/me'
+export const API_TEAMS = '/api/teams'
+export const API_USERS_ME = '/api/users/me'
 export const API_USERS_ME_ACTIVE_TEAM = `${API_USERS_ME}/active-team`
 export const API_USERS_ME_INVITATIONS = `${API_USERS_ME}/invitations`
 
-export const API_NOTIFICATIONS = '/api/new/notifications'
+export const API_NOTIFICATIONS = '/api/notifications'
 
-export const API_AUDIT = `/api/new/audit-log`
+export const API_AUDIT = `/api/audit-log`
 
-export const API_TEMPLATES = `/api/new/templates`
+export const API_TEMPLATES = `/api/templates`
 
-export const API_DASHBOARD = '/api/new/dashboard'
+export const API_DASHBOARD = '/api/dashboard'
 
-export const API_TOKENS = '/api/new/tokens'
+export const API_TOKENS = '/api/tokens'
 
-export const API_STORAGES = '/api/new/storages'
+export const API_STORAGES = '/api/storages'
 export const API_STORAGES_OPTIONS = `${API_STORAGES}/options`
 
-export const API_HEALTH = '/api/new/health'
+export const WS_NODES = `/nodes`
+export const WS_REGISTRIES = `/registries`
 
-export const WS_NODES = `/api/nodes/connect`
-export const WS_REGISTRIES = `/api/registries/connect`
+export const API_HEALTH = '/api/health'
 
 export type CruxUrlParams = {
   anchor?: string
@@ -160,11 +160,11 @@ export const registryApiUrl = (id: string) => `${API_REGISTRIES}/${id}`
 // node
 export const nodeUrl = (id: string) => `${ROUTE_NODES}/${id}`
 export const nodeInspectUrl = (id: string, prefix?: string) => `${nodeUrl(id)}?prefix=${prefix}`
-export const nodeApiUrl = (id: string) => `/api/new${nodeUrl(id)}`
+export const nodeApiUrl = (id: string) => `${API_NODES}/${id}`
 export const nodeScriptApiUrl = (id: string) => `${nodeApiUrl(id)}/script`
 export const nodeTokenApiUrl = (id: string) => `${nodeApiUrl(id)}/token`
 export const nodeUpdateApiUrl = (id: string) => `${nodeApiUrl(id)}/update`
-export const nodeWsUrl = (id: string) => `/api/nodes/${id}/connect`
+export const nodeWsUrl = (id: string) => `/nodes/${id}`
 
 // node-global-container
 export const nodeGlobalContainerListApiUrl = (nodeId: string) => `${nodeApiUrl(nodeId)}/containers`
@@ -204,7 +204,7 @@ export const versionIncreaseApiUrl = (productId: string, versionId: string) =>
   `${versionApiUrl(productId, versionId)}/increase`
 export const versionSetDefaultApiUrl = (productId: string, versionId: string) =>
   `${versionApiUrl(productId, versionId)}/default`
-export const versionWsUrl = (productId: string, versionId: string) => `/api${versionUrl(productId, versionId)}/connect`
+export const versionWsUrl = (versionId: string) => `/versions/${versionId}`
 
 // deployment
 export const versionDeploymentsUrl = (productId: string, versionId: string) =>
@@ -216,9 +216,7 @@ export const deploymentUrl = (deploymentId: string) => `${ROUTE_DEPLOYMENTS}/${d
 
 export const deploymentApiUrl = (deploymentId: string) => `${API_DEPLOYMENTS}/${deploymentId}`
 
-export const deploymentEventsApiUrl = (deploymentId: string) => `${deploymentApiUrl(deploymentId)}/events`
-
-export const deploymentWsUrl = (deploymentId: string) => `/api${deploymentUrl(deploymentId)}/connect`
+export const deploymentWsUrl = (deploymentId: string) => `${deploymentUrl(deploymentId)}`
 
 export const deploymentDeployUrl = (deploymentId: string) => `${deploymentUrl(deploymentId)}/deploy`
 

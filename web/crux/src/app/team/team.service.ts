@@ -1,21 +1,22 @@
 import { Injectable, Logger } from '@nestjs/common'
-import { Identity, Session } from '@ory/kratos-client'
+import { Identity } from '@ory/kratos-client'
 import { RegistryTypeEnum } from '@prisma/client'
+import { Request as ExpressRequest } from 'express'
+import { IdentityTraits, emailOfIdentity, invitationExpired, nameOfIdentity } from 'src/domain/identity'
 import { InviteMessage } from 'src/domain/notification-templates'
 import {
-  AlreadyExistsException,
-  MailServiceException,
-  NotFoundException,
-  PreconditionFailedException,
-} from 'src/exception/errors'
-import InterceptorGrpcHelperProvider from 'src/interceptors/helper.interceptor'
+  CruxConflictException,
+  CruxInternalServerErrorException,
+  CruxNotFoundException,
+  CruxPreconditionFailedException,
+} from 'src/exception/crux-exception'
 import EmailService from 'src/mailer/email.service'
 import DomainNotificationService from 'src/services/domain.notification.service'
 import KratosService from 'src/services/kratos.service'
 import PrismaService from 'src/services/prisma.service'
 import { REGISTRY_HUB_URL } from 'src/shared/const'
-import { emailOfIdentity, IdentityTraits, invitationExpired, nameOfIdentity } from 'src/shared/models'
 import EmailBuilder, { InviteTemplateOptions } from '../../builders/email.builder'
+import AuditLoggerService from '../shared/audit.logger.service'
 import {
   ActivateTeamDto,
   CreateTeamDto,
@@ -39,14 +40,17 @@ export default class TeamService {
     private kratos: KratosService,
     private emailService: EmailService,
     private mapper: TeamMapper,
-    private auditHelper: InterceptorGrpcHelperProvider,
     private emailBuilder: EmailBuilder,
     private notificationService: DomainNotificationService,
+    private auditLoggerService: AuditLoggerService,
   ) {}
 
-  async getUserMeta(session: Session): Promise<UserMetaDto> {
-    const { identity } = session
+  async checkUserActiveTeam(teamId: string, identity: Identity): Promise<boolean> {
+    const userOnTeam = await this.teamRepository.getActiveTeamByUserId(identity.id)
+    return userOnTeam.teamId === teamId
+  }
 
+  async getUserMeta(identity: Identity): Promise<UserMetaDto> {
     const teams = await this.prisma.usersOnTeams.findMany({
       where: {
         userId: identity.id,
@@ -76,10 +80,10 @@ export default class TeamService {
       },
     })
 
-    return this.mapper.toUserMetaDto(teams, invitations, session)
+    return this.mapper.toUserMetaDto(teams, invitations, identity)
   }
 
-  async createTeam(request: CreateTeamDto, identity: Identity): Promise<TeamDto> {
+  async createTeam(request: CreateTeamDto, identity: Identity, httpRequest: ExpressRequest): Promise<TeamDto> {
     // If the user doesn't have an active team, make the current one active
     const userHasTeam = await this.teamRepository.userHasTeam(identity.id)
 
@@ -107,17 +111,11 @@ export default class TeamService {
             type: RegistryTypeEnum.hub,
           },
         },
-        // Add audit log manually
-        // TODO(@m8vago): add this back when the audit-log gets restored
-        // auditLog: {
-        //   create: {
-        //     ...this.auditHelper.mapServerCallToGrpcLog(request, call),
-        //     userId: identity.id,
-        //   },
-        // },
       },
       include: this.teamRepository.teamInclude,
     })
+
+    await this.auditLoggerService.createHttpAudit('all', identity, httpRequest)
 
     return this.mapper.toDto(team)
   }
@@ -310,7 +308,7 @@ export default class TeamService {
         },
       })
 
-      throw new PreconditionFailedException({
+      throw new CruxPreconditionFailedException({
         message: 'Invitation link is expired. ',
         property: 'teamId',
         value: teamId,
@@ -438,7 +436,7 @@ export default class TeamService {
     }
 
     if (!deleted) {
-      throw new NotFoundException({
+      throw new CruxNotFoundException({
         message: 'User not found',
         property: 'userId',
         value: userId,
@@ -492,7 +490,7 @@ export default class TeamService {
       const userOnTeam = team.users.find(it => it.userId === user.id)
 
       if (userOnTeam) {
-        throw new AlreadyExistsException({
+        throw new CruxConflictException({
           message: 'User is already in the team',
           property: 'email',
         })
@@ -518,7 +516,7 @@ export default class TeamService {
 
     // Result
     if (!mailSent) {
-      throw new MailServiceException()
+      throw new CruxInternalServerErrorException({ message: 'Sending mail failed.' })
     }
 
     return user

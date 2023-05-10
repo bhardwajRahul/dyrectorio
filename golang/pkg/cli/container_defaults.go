@@ -29,7 +29,6 @@ const (
 
 const (
 	defaultCruxAgentGrpcPort   = 5000
-	defaultCruxGrpcPort        = 5001
 	defaultCruxHTTPPort        = 1848
 	defaultCruxUIPort          = 3000
 	defaultTraefikWebPort      = 8000
@@ -42,7 +41,7 @@ const (
 	defaultPostgresPort        = 5432
 )
 
-// Crux services: db migrations and crux api service
+// GetCrux services: db migrations and crux api service
 func GetCrux(state *State, args *ArgsFlags) containerbuilder.Builder {
 	crux := containerbuilder.NewDockerBuilder(context.Background()).
 		WithImage(TryImage(fmt.Sprintf("%s:%s", state.Crux.Image, state.SettingsFile.Version), args.SpecialImageTag)).
@@ -56,17 +55,14 @@ func GetCrux(state *State, args *ArgsFlags) containerbuilder.Builder {
 		WithCmd([]string{"serve"}).
 		WithLabels(map[string]string{
 			"traefik.enable": "true",
-			"traefik.http.routers.crux.rule": fmt.Sprintf("(Host(`localhost`) && PathPrefix(`/api/new`)) || "+
-				"(Host(`%s`) && PathPrefix(`/api/new`)) || "+
-				"(Host(`%s`) && PathPrefix(`/api/new`))",
+			"traefik.http.routers.crux.rule": fmt.Sprintf("(Host(`localhost`) || Host(`%s`) || Host(`%s`)) && "+
+				"PathPrefix(`/api`) && !PathPrefix(`/api/auth`) && !PathPrefix(`/api/status`) ",
 				state.Containers.Traefik.Name, state.InternalHostDomain),
-			"traefik.http.routers.crux.entrypoints":                    "web",
-			"traefik.http.services.crux.loadbalancer.server.port":      fmt.Sprintf("%d", defaultCruxHTTPPort),
-			"traefik.http.middlewares.crux-strip.stripprefix.prefixes": "/api/new",
-			"traefik.http.routers.crux.middlewares":                    "crux-strip",
-			"com.docker.compose.project":                               args.Prefix,
-			"com.docker.compose.service":                               state.Containers.Crux.Name,
-			label.DyrectorioOrg + label.ContainerPrefix:                args.Prefix,
+			"traefik.http.routers.crux.entrypoints":               "web",
+			"traefik.http.services.crux.loadbalancer.server.port": fmt.Sprintf("%d", defaultCruxHTTPPort),
+			"com.docker.compose.project":                          args.Prefix,
+			"com.docker.compose.service":                          state.Containers.Crux.Name,
+			label.DyrectorioOrg + label.ContainerPrefix:           args.Prefix,
 		}).
 		WithPreStartHooks(getCruxInitContainer(state, args))
 
@@ -76,10 +72,6 @@ func GetCrux(state *State, args *ArgsFlags) containerbuilder.Builder {
 				{
 					ExposedPort: defaultCruxAgentGrpcPort,
 					PortBinding: pointer.ToUint16(uint16(state.SettingsFile.CruxAgentGrpcPort)),
-				},
-				{
-					ExposedPort: defaultCruxGrpcPort,
-					PortBinding: pointer.ToUint16(uint16(state.SettingsFile.CruxGrpcPort)),
 				},
 				{
 					ExposedPort: defaultCruxHTTPPort,
@@ -168,23 +160,19 @@ func getCruxEnvs(state *State, args *ArgsFlags) []string {
 		fmt.Sprintf("CRUX_AGENT_IMAGE=%s", state.SettingsFile.Version),
 		fmt.Sprintf("LOCAL_DEPLOYMENT_NETWORK=%s", state.SettingsFile.Network),
 		fmt.Sprintf("JWT_SECRET=%s", state.SettingsFile.CruxSecret),
-		fmt.Sprintf("FROM_NAME=%s", state.SettingsFile.FromName),
-		fmt.Sprintf("FROM_EMAIL=%s", state.SettingsFile.FromEmail),
+		fmt.Sprintf("FROM_NAME=%s", state.SettingsFile.MailFromName),
+		fmt.Sprintf("FROM_EMAIL=%s", state.SettingsFile.MailFromEmail),
 		fmt.Sprintf("SMTP_URI=%s:1025/?skip_ssl_verify=true&legacy_ssl=true", state.Containers.MailSlurper.Name),
 		fmt.Sprintf("AGENT_INSTALL_SCRIPT_DISABLE_PULL=%t", args.DisableForcepull),
 		"DISABLE_RECAPTCHA=true",
 	}
 }
 
+// GetCruxUI returns a configured crux-ui service
 func GetCruxUI(state *State, args *ArgsFlags) containerbuilder.Builder {
 	traefikHost := localhost
 	if args.FullyContainerized {
 		traefikHost = state.Containers.Traefik.Name
-	}
-
-	cruxAPIAddress := fmt.Sprintf("CRUX_API_ADDRESS=%s:%d", state.CruxUI.CruxAddr, state.SettingsFile.CruxGrpcPort)
-	if args.CruxDisabled {
-		cruxAPIAddress = fmt.Sprintf("CRUX_API_ADDRESS=%s:%d", state.InternalHostDomain, state.SettingsFile.CruxGrpcPort)
 	}
 
 	cruxUI := containerbuilder.NewDockerBuilder(context.Background()).
@@ -203,7 +191,6 @@ func GetCruxUI(state *State, args *ArgsFlags) containerbuilder.Builder {
 			fmt.Sprintf("KRATOS_ADMIN_URL=http://%s:%d",
 				state.Containers.Kratos.Name,
 				state.SettingsFile.KratosAdminPort),
-			cruxAPIAddress,
 			"DISABLE_RECAPTCHA=true",
 		}).
 		WithNetworks([]string{state.SettingsFile.Network}).
@@ -236,7 +223,7 @@ func GetCruxUI(state *State, args *ArgsFlags) containerbuilder.Builder {
 	return cruxUI.WithForcePullImage()
 }
 
-// Return Traefik services container
+// GetTraefik returns a traefik services container
 func GetTraefik(state *State, args *ArgsFlags) containerbuilder.Builder {
 	envDockerHost := os.Getenv("DOCKER_HOST")
 
@@ -331,10 +318,8 @@ func GetKratos(state *State, args *ArgsFlags) containerbuilder.Builder {
 		WithNetworkAliases(state.Containers.Kratos.Name).
 		WithLabels(map[string]string{
 			"traefik.enable": "true",
-			"traefik.http.routers.kratos.rule": fmt.Sprintf("(Host(`localhost`) && PathPrefix(`/kratos`)) || "+
-				"(Host(`%s`) && PathPrefix(`/kratos`)) || "+
-				"(Host(`%s`) && PathPrefix(`/kratos`))",
-				state.Containers.Traefik.Name, state.InternalHostDomain),
+			"traefik.http.routers.kratos.rule": fmt.Sprintf("(Host(`localhost`) || Host(`%s`) || Host(`%s`)) && "+
+				"PathPrefix(`/kratos`)", state.Containers.Traefik.Name, state.InternalHostDomain),
 			"traefik.http.routers.kratos.entrypoints":                    "web",
 			"traefik.http.services.kratos.loadbalancer.server.port":      fmt.Sprintf("%d", defaultKratosPublicPort),
 			"traefik.http.middlewares.kratos-strip.stripprefix.prefixes": "/kratos",
@@ -436,8 +421,8 @@ func GetKratosEnvs(state *State, args *ArgsFlags) []string {
 		fmt.Sprintf("SMTP_URI=%s:1025/?skip_ssl_verify=true&legacy_ssl=true", state.Containers.MailSlurper.Name),
 		fmt.Sprintf("COURIER_SMTP_CONNECTION_URI=smtps://test:test@%s:1025/?skip_ssl_verify=true&legacy_ssl=true",
 			state.Containers.MailSlurper.Name),
-		fmt.Sprintf("FROM_NAME=%s", state.SettingsFile.FromName),
-		fmt.Sprintf("FROM_EMAIL=%s", state.SettingsFile.FromEmail),
+		fmt.Sprintf("FROM_NAME=%s", state.SettingsFile.MailFromName),
+		fmt.Sprintf("FROM_EMAIL=%s", state.SettingsFile.MailFromEmail),
 	}
 }
 

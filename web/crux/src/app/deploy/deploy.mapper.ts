@@ -1,64 +1,60 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common'
+import { Injectable } from '@nestjs/common'
 import {
   ContainerStateEnum,
   Deployment,
   DeploymentEvent,
   DeploymentEventTypeEnum,
   DeploymentStatusEnum,
-  Instance,
   InstanceContainerConfig,
-  Node,
-  Product,
   Storage,
-  Version,
 } from '@prisma/client'
 import {
-  CommonContainerConfig,
-  CraneContainerConfig,
-  DagentContainerConfig,
-  ImportContainer,
-  InitContainer as AgentInitContainer,
-  InstanceConfig,
-} from 'src/grpc/protobuf/proto/agent'
-import {
-  ContainerState,
-  containerStateFromJSON,
-  containerStateToJSON,
-  DeploymentStatus,
-  deploymentStatusFromJSON,
-  DeploymentStrategy as ProtoDeploymentStrategy,
-  ExposeStrategy as ProtoExposeStrategy,
-  KeyValue,
-  ListSecretsResponse,
-} from 'src/grpc/protobuf/proto/common'
-import {
-  AuditResponse,
-  InitContainer,
-  InstanceContainerConfig as ProtoInstanceContainerConfig,
-  InstanceResponse,
-} from 'src/grpc/protobuf/proto/crux'
-import {
   ContainerConfigData,
+  InitContainer,
   InstanceContainerConfigData,
   MergedContainerConfigData,
   UniqueKey,
   UniqueKeyValue,
-} from 'src/shared/models'
-import ImageMapper, { ImageDetails } from '../image/image.mapper'
-import ContainerMapper from '../shared/container.mapper'
-import { BasicProperties, NodeConnectionStatus } from '../shared/shared.dto'
+} from 'src/domain/container'
+import { deploymentStatusToDb } from 'src/domain/deployment'
+import { CruxInternalServerErrorException } from 'src/exception/crux-exception'
+import {
+  InitContainer as AgentInitContainer,
+  CommonContainerConfig,
+  CraneContainerConfig,
+  DagentContainerConfig,
+  ImportContainer,
+  InstanceConfig,
+} from 'src/grpc/protobuf/proto/agent'
+import {
+  ContainerState,
+  DeploymentStatusMessage,
+  KeyValue,
+  ListSecretsResponse,
+  DeploymentStrategy as ProtoDeploymentStrategy,
+  ExposeStrategy as ProtoExposeStrategy,
+  containerStateToJSON,
+} from 'src/grpc/protobuf/proto/common'
+import ContainerMapper from '../container/container.mapper'
+import ImageMapper from '../image/image.mapper'
+import { NodeConnectionStatus } from '../shared/shared.dto'
 import SharedMapper from '../shared/shared.mapper'
 import {
+  DeploymentDetails,
   DeploymentDetailsDto,
   DeploymentDto,
   DeploymentEventDto,
   DeploymentEventTypeDto,
   DeploymentStatusDto,
   DeploymentWithBasicNodeDto,
+  DeploymentWithNode,
+  DeploymentWithNodeVersion,
   InstanceContainerConfigDto,
+  InstanceDetails,
   InstanceDto,
   InstanceSecretsDto,
 } from './deploy.dto'
+import { DeploymentEventMessage } from './deploy.message'
 
 @Injectable()
 export default class DeployMapper {
@@ -102,6 +98,7 @@ export default class DeployMapper {
   toDetailsDto(deployment: DeploymentDetails, publicKey?: string): DeploymentDetailsDto {
     return {
       ...this.toDto(deployment),
+      lastTry: deployment.tries,
       publicKey,
       environment: deployment.environment as UniqueKeyValue[],
       instances: deployment.instances.map(it => this.instanceToDto(it)),
@@ -135,7 +132,7 @@ export default class DeployMapper {
     }
 
     return {
-      ...this.imageMapper.containerConfigDataToDto(it as ContainerConfigData),
+      ...this.containerMapper.configDataToDto(it as ContainerConfigData),
       secrets: it.secrets,
     }
   }
@@ -145,7 +142,7 @@ export default class DeployMapper {
     currentConfig: InstanceContainerConfigData,
     patch: InstanceContainerConfigDto,
   ): InstanceContainerConfigData {
-    const config = this.imageMapper.configDtoToContainerConfigData(currentConfig as ContainerConfigData, patch)
+    const config = this.containerMapper.configDtoToConfigData(currentConfig as ContainerConfigData, patch)
 
     if (config.labels) {
       const currentLabels = currentConfig.labels ?? imageConfig.labels ?? {}
@@ -179,19 +176,13 @@ export default class DeployMapper {
   }
 
   instanceConfigDataToDb(config: InstanceContainerConfigData): Omit<InstanceContainerConfig, 'id' | 'instanceId'> {
-    const imageConfig = this.imageMapper.containerConfigDataToDb(config)
+    const imageConfig = this.containerMapper.configDataToDb(config)
     return {
       ...imageConfig,
       tty: config.tty,
       useLoadBalancer: config.useLoadBalancer,
       proxyHeaders: config.proxyHeaders,
     }
-  }
-
-  instanceContainerConfigDataToDb(
-    config: InstanceContainerConfigData,
-  ): Omit<InstanceContainerConfig, 'id' | 'instanceId'> {
-    return this.imageMapper.containerConfigDataToDb(config)
   }
 
   eventTypeToDto(it: DeploymentEventTypeEnum): DeploymentEventTypeDto {
@@ -227,7 +218,7 @@ export default class DeployMapper {
         break
       }
       default:
-        throw new InternalServerErrorException({
+        throw new CruxInternalServerErrorException({
           message: 'Unsupported deployment event type!',
         })
     }
@@ -235,23 +226,36 @@ export default class DeployMapper {
     return result
   }
 
-  instanceToProto(instance: InstanceDetails): InstanceResponse {
-    return {
-      ...instance,
-      audit: AuditResponse.fromJSON(instance),
-      image: this.imageMapper.detailsToProto(instance.image),
-      state: this.containerStateToProto(instance.state),
-      config: this.instanceConfigToProto((instance.config ?? {}) as InstanceContainerConfigData),
+  progressEventToEventDto(message: DeploymentStatusMessage): DeploymentEventMessage[] {
+    const events: DeploymentEventMessage[] = []
+    if (message.log) {
+      events.push({
+        type: 'log',
+        createdAt: new Date(),
+        log: message.log,
+      })
     }
-  }
 
-  instanceConfigToProto(config: InstanceContainerConfigData): ProtoInstanceContainerConfig {
-    return {
-      common: this.imageMapper.commonConfigToProto(config),
-      dagent: this.imageMapper.dagentConfigToProto(config),
-      crane: this.imageMapper.craneConfigToProto(config),
-      secrets: !config.secrets ? null : { data: config.secrets },
+    if (message.deploymentStatus) {
+      events.push({
+        type: 'deployment-status',
+        createdAt: new Date(),
+        deploymentStatus: this.statusToDto(deploymentStatusToDb(message.deploymentStatus)),
+      })
     }
+
+    if (message.instance) {
+      events.push({
+        type: 'container-status',
+        createdAt: new Date(),
+        containerState: {
+          instanceId: message.instance.instanceId,
+          state: this.containerStateToDb(message.instance.state),
+        },
+      })
+    }
+
+    return events
   }
 
   deploymentToAgentInstanceConfig(deployment: Deployment): InstanceConfig {
@@ -261,19 +265,6 @@ export default class DeployMapper {
         env: this.jsonToPipedFormat((deployment.environment as UniqueKeyValue[]) ?? []),
       },
     }
-  }
-
-  statusToProto(status: DeploymentStatusEnum): DeploymentStatus {
-    switch (status) {
-      case DeploymentStatusEnum.inProgress:
-        return DeploymentStatus.IN_PROGRESS
-      default:
-        return deploymentStatusFromJSON(status.toUpperCase())
-    }
-  }
-
-  containerStateToProto(state?: ContainerStateEnum): ContainerState {
-    return state ? containerStateFromJSON(state.toUpperCase()) : null
   }
 
   containerStateToDb(state?: ContainerState): ContainerStateEnum {
@@ -411,23 +402,4 @@ export default class DeployMapper {
       environment,
     }
   }
-}
-
-export type DeploymentWithNode = Deployment & {
-  node: Pick<Node, BasicProperties>
-}
-
-type DeploymentWithNodeVersion = DeploymentWithNode & {
-  version: Pick<Version, BasicProperties> & {
-    product: Pick<Product, BasicProperties>
-  }
-}
-
-export type InstanceDetails = Instance & {
-  image: ImageDetails
-  config?: InstanceContainerConfig
-}
-
-export type DeploymentDetails = DeploymentWithNodeVersion & {
-  instances: InstanceDetails[]
 }
